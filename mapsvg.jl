@@ -17,7 +17,7 @@ gridS = addgrid(parseS,30,65,30,30);
 #display("image/svg+xml", gridS);
 #write(open("testWorld copy.svg", "w"), gridS);
 #display("image/svg+xml", project(90, 0, "Orthographic", gridS));
-write(open("testWorld copy.svg", "w"), project(90, 0, "Orthographic", gridS));
+write(open("testWorld copy.svg", "w"), project(90, 30, "Orthographic", gridS));
 
 #write(open("World copy.svg", "w"), parseS);
 #display("image/svg+xml", read(open("World copy.svg", "r"), String))
