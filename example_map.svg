@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-180 -90 360 180">
+  <!-- A red triangle in the western hemisphere -->
+  <path d="M -120,30 L -90,60 L -60,30 Z" stroke="red" fill="none"/>
+  <!-- A blue triangle in the eastern hemisphere -->
+  <path d="M 30,-30 L 50,-10 L 70,-30 Z" stroke="blue" fill="none"/>
+</svg>
