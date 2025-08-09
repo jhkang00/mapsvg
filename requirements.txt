@@ -1,0 +1,2 @@
+# Python dependencies for MapSVG
+# Core mathematical operations (no external dependencies needed - using built-in math, re, random)
