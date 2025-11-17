@@ -39,7 +39,7 @@ def main():
     grid_s = addgrid(parse_s, 30, 65, 30, 30)
     
     # Apply projection and save
-    projected = project(300, 0, "Orthographic", grid_s)
+    projected = project(285, -10, "Orthographic", grid_s)
     
     with open("testWorld copy.svg", "w") as f:
         f.write(projected)

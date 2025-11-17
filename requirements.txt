@@ -1,2 +1,5 @@
 # Python dependencies for MapSVG
-# Core mathematical operations (no external dependencies needed - using built-in math, re, random)
+Flask==2.3.3
+Pillow==10.0.1
+cairosvg==2.7.1
+flask-cors==4.0.0
