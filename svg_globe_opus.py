@@ -26,9 +26,15 @@ from typing import List, Tuple, Optional
 # CONFIGURATION
 # ============================================================================
 
-# SVG coordinate system dimensions
+# SVG coordinate system dimensions (unified after hemisphere alignment)
 SVG_WIDTH = 4170.0
 SVG_HEIGHT = 1668.0
+
+# HEMISPHERE ALIGNMENT SHIFTS (CRITICAL)
+# Each SVG uses local viewBox 0-2224, these shifts align them to unified space
+# Reference: convcoor(-174, 0) = (69.5, 834), convcoor(0, 0) = (2085, 834)
+INNER_SHIFT = -69.5      # InnerWorld (Eastern hemisphere) shifts left
+OUTER_SHIFT = 2015.5     # OuterWorld (Western hemisphere) shifts right
 
 # Geographic bounds (Mercator projection limits)
 LON_RANGE = 180.0  # ±180 degrees
@@ -43,12 +49,12 @@ BEZIER_SAMPLES = 5  # Points per curve segment
 
 # Douglas-Peucker simplification
 SIMPLIFY_ENABLED = True
-SIMPLIFY_EPSILON = 0.2  # SVG pixel units
+SIMPLIFY_EPSILON = 0.2  # Unified SVG pixel units
 SIMPLIFY_THRESHOLD = 1000  # Min points before simplifying
 
 # Visualization settings
 WINDOW_SIZE = (1600, 1600)
-LINE_WIDTH = 1.5
+LINE_WIDTH = 2.0
 LINE_OPACITY = 0.85
 SPHERE_COLOR = '#1a1a2e'  # Dark blue
 MAP_COLOR = '#e0e0e0'     # Light gray/white
@@ -570,12 +576,28 @@ def points_to_polyline(points_3d: List[np.ndarray]) -> Optional[pv.PolyData]:
 # SVG TO 3D CONVERSION
 # ============================================================================
 
-def process_svg_paths(svg_paths: List[str]) -> List[pv.PolyData]:
+def apply_hemisphere_shift(points: List[np.ndarray], shift: float) -> List[np.ndarray]:
     """
-    Process SVG paths and convert to 3D polylines.
+    Apply x-coordinate shift for hemisphere alignment.
+    
+    Args:
+        points: List of 2D points in local SVG coordinates
+        shift: Pixels to add to x-coordinate (negative for left shift)
+        
+    Returns:
+        List of shifted 2D points in unified coordinate system
+    """
+    return [np.array([p[0] + shift, p[1]]) for p in points]
+
+
+def process_svg_paths(svg_paths: List[str], hemisphere_shift: float = 0.0) -> List[pv.PolyData]:
+    """
+    Process SVG paths and convert to 3D polylines with hemisphere alignment.
     
     Args:
         svg_paths: List of SVG path 'd' attribute strings
+        hemisphere_shift: X-coordinate shift for hemisphere alignment
+                         (INNER_SHIFT for InnerWorld, OUTER_SHIFT for OuterWorld)
         
     Returns:
         List of PyVista polylines
@@ -585,21 +607,24 @@ def process_svg_paths(svg_paths: List[str]) -> List[pv.PolyData]:
     total_points_after = 0
     
     for i, path_data in enumerate(svg_paths):
-        # Convert path to 2D points
+        # Convert path to 2D points (local coordinates)
         points_2d = path_to_points(path_data)
         
         if len(points_2d) < 2:
             continue
         
+        # CRITICAL: Apply hemisphere shift BEFORE any other processing
+        points_2d = apply_hemisphere_shift(points_2d, hemisphere_shift)
+        
         total_points_before += len(points_2d)
         
-        # Optional simplification
+        # Optional simplification (after hemisphere alignment)
         if SIMPLIFY_ENABLED and len(points_2d) > SIMPLIFY_THRESHOLD:
             points_2d = simplify_path(points_2d)
         
         total_points_after += len(points_2d)
         
-        # Convert to 3D
+        # Convert to 3D (now using unified coordinates)
         points_3d = [svg_point_to_3d(p) for p in points_2d]
         
         # Create polyline
@@ -607,7 +632,8 @@ def process_svg_paths(svg_paths: List[str]) -> List[pv.PolyData]:
         if polyline is not None:
             polylines.append(polyline)
     
-    print(f"  Points: {total_points_before:,} -> {total_points_after:,} "
+    shift_label = f"shift={hemisphere_shift:+.1f}"
+    print(f"  [{shift_label}] Points: {total_points_before:,} -> {total_points_after:,} "
           f"({100 * total_points_after / max(1, total_points_before):.1f}%)")
     
     return polylines
@@ -626,15 +652,8 @@ def setup_plotter() -> pv.Plotter:
     """
     plotter = pv.Plotter(window_size=WINDOW_SIZE)
     
-    # Set background to starfield or dark
-    try:
-        # Try to use starfield background
-        cubemap = pv.examples.download_sky_box_cube_map()
-        plotter.set_environment_texture(cubemap)
-        plotter.add_background_image(cubemap)
-    except Exception:
-        # Fall back to solid dark background
-        plotter.set_background('black')
+    # Use solid black background (avoids BackgroundRenderer issues with starfield)
+    plotter.set_background('black')
     
     return plotter
 
@@ -654,21 +673,32 @@ def main():
     inner_paths = parse_svg_file(inner_svg)
     outer_paths = parse_svg_file(outer_svg)
     
-    all_paths = inner_paths + outer_paths
-    print(f"Total paths found: {len(all_paths)}")
+    print(f"Total paths found: {len(inner_paths) + len(outer_paths)}")
     
-    if not all_paths:
+    if not inner_paths and not outer_paths:
         print("\nNo SVG paths found. Please ensure InnerWorld.svg and OuterWorld.svg")
         print("are in the current directory.")
         print("\nCreating demo globe with grid only...")
     
-    # Process SVG paths to 3D
-    print("\nConverting paths to 3D...")
-    if all_paths:
-        map_polylines = process_svg_paths(all_paths)
-        print(f"Created {len(map_polylines)} polylines")
-    else:
-        map_polylines = []
+    # Process SVG paths to 3D WITH HEMISPHERE SHIFTS
+    print("\nConverting paths to 3D with hemisphere alignment...")
+    map_polylines = []
+    
+    # Process InnerWorld (Eastern hemisphere) with left shift
+    if inner_paths:
+        print(f"  Processing InnerWorld ({len(inner_paths)} paths)...")
+        inner_polylines = process_svg_paths(inner_paths, hemisphere_shift=INNER_SHIFT)
+        map_polylines.extend(inner_polylines)
+        print(f"    Created {len(inner_polylines)} polylines from InnerWorld")
+    
+    # Process OuterWorld (Western hemisphere) with right shift
+    if outer_paths:
+        print(f"  Processing OuterWorld ({len(outer_paths)} paths)...")
+        outer_polylines = process_svg_paths(outer_paths, hemisphere_shift=OUTER_SHIFT)
+        map_polylines.extend(outer_polylines)
+        print(f"    Created {len(outer_polylines)} polylines from OuterWorld")
+    
+    print(f"Total polylines: {len(map_polylines)}")
     
     # Create sphere
     print("\nGenerating sphere geometry...")
@@ -691,7 +721,7 @@ def main():
         name='sphere'
     )
     
-    # Add map polylines
+    # Add map polylines (render as tubes without vertex emphasis)
     for i, polyline in enumerate(map_polylines):
         plotter.add_mesh(
             polyline,
@@ -699,10 +729,11 @@ def main():
             line_width=LINE_WIDTH,
             opacity=LINE_OPACITY,
             render_lines_as_tubes=True,
+            style='wireframe',  # Ensures clean line rendering
             name=f'map_{i}'
         )
     
-    # Add grid lines
+    # Add grid lines (also as clean tubes without vertices)
     # Equator (red)
     if equator is not None:
         plotter.add_mesh(
@@ -711,6 +742,7 @@ def main():
             line_width=3,
             opacity=0.7,
             render_lines_as_tubes=True,
+            style='wireframe',
             name='equator'
         )
     
@@ -722,6 +754,7 @@ def main():
             line_width=2,
             opacity=0.7,
             render_lines_as_tubes=True,
+            style='wireframe',
             name=f'parallel_{i}'
         )
     
@@ -733,20 +766,21 @@ def main():
             line_width=2,
             opacity=0.7,
             render_lines_as_tubes=True,
+            style='wireframe',
             name=f'meridian_{i}'
         )
     
-    # Configure camera
+    # Configure camera for terrain-style viewing (stable horizon)
     plotter.camera_position = 'xy'
     plotter.camera.zoom(0.8)
     
-    # Enable trackball-style rotation
-    plotter.enable_trackball_style()
+    # Enable terrain-style camera controls (natural globe rotation)
+    plotter.enable_terrain_style(mouse_wheel_zooms=True)
     
     # Show instructions
     print("\n" + "=" * 60)
-    print("CONTROLS:")
-    print("  Left-drag:  Rotate globe")
+    print("CONTROLS (Terrain Style):")
+    print("  Left-drag:  Rotate globe (horizon stays stable)")
     print("  Right-drag: Pan view")
     print("  Scroll:     Zoom in/out")
     print("  Q or ESC:   Close window")
