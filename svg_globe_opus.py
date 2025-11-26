@@ -56,6 +56,9 @@ SIMPLIFY_THRESHOLD = 1000  # Min points before simplifying
 WINDOW_SIZE = (1600, 1600)
 LINE_WIDTH = 2.0
 LINE_OPACITY = 0.85
+MAP_TUBE_RADIUS = 0.001    # Thin tubes for coastlines
+GRID_TUBE_RADIUS = 0.003   # Slightly thicker for grid lines
+EQUATOR_TUBE_RADIUS = 0.005  # Thickest for equator
 SPHERE_COLOR = '#1a1a2e'  # Dark blue
 MAP_COLOR = '#e0e0e0'     # Light gray/white
 
@@ -190,45 +193,56 @@ def linearize_bezier(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray,
     return [cubic_bezier_point(p0, p1, p2, p3, t) for t in t_values]
 
 
-def path_to_points(path_data: str) -> List[np.ndarray]:
+def path_to_points(path_data: str) -> List[List[np.ndarray]]:
     """
-    Convert SVG path data to list of 2D points.
+    Convert SVG path data to list of point segments.
+    Each M (move-to) command starts a new disconnected segment.
     
     Args:
         path_data: SVG path 'd' attribute string
         
     Returns:
-        List of 2D points (numpy arrays)
+        List of segments, where each segment is a list of 2D points
     """
     commands = parse_path_commands(path_data)
-    points = []
+    segments = []
+    current_segment = []
     current_pos = np.array([0.0, 0.0])
     
     for cmd, coords in commands:
         if cmd == 'M':
-            # Move to (absolute)
+            # Move to (absolute) - starts a NEW segment
             if len(coords) >= 2:
+                # Save previous segment if it has points
+                if len(current_segment) >= 2:
+                    segments.append(current_segment)
+                
+                # Start new segment
                 current_pos = np.array([coords[0], coords[1]])
-                points.append(current_pos.copy())
+                current_segment = [current_pos.copy()]
                 
                 # Subsequent pairs are implicit line-to commands
                 for i in range(2, len(coords) - 1, 2):
                     current_pos = np.array([coords[i], coords[i + 1]])
-                    points.append(current_pos.copy())
+                    current_segment.append(current_pos.copy())
                     
         elif cmd == 'm':
-            # Move to (relative)
+            # Move to (relative) - starts a NEW segment
             if len(coords) >= 2:
+                # Save previous segment if it has points
+                if len(current_segment) >= 2:
+                    segments.append(current_segment)
+                
+                # Start new segment
                 current_pos = current_pos + np.array([coords[0], coords[1]])
-                points.append(current_pos.copy())
+                current_segment = [current_pos.copy()]
                 
                 for i in range(2, len(coords) - 1, 2):
                     current_pos = current_pos + np.array([coords[i], coords[i + 1]])
-                    points.append(current_pos.copy())
+                    current_segment.append(current_pos.copy())
                     
         elif cmd == 'C':
             # Cubic Bézier (absolute)
-            # Format: C x1 y1 x2 y2 x3 y3 [x1 y1 x2 y2 x3 y3 ...]
             for i in range(0, len(coords) - 5, 6):
                 p0 = current_pos
                 p1 = np.array([coords[i], coords[i + 1]])
@@ -239,7 +253,7 @@ def path_to_points(path_data: str) -> List[np.ndarray]:
                 bezier_points = linearize_bezier(p0, p1, p2, p3, BEZIER_SAMPLES)
                 
                 # Add all points except the first (it's the current position)
-                points.extend(bezier_points[1:])
+                current_segment.extend(bezier_points[1:])
                 current_pos = p3.copy()
                 
         elif cmd == 'c':
@@ -251,27 +265,31 @@ def path_to_points(path_data: str) -> List[np.ndarray]:
                 p3 = current_pos + np.array([coords[i + 4], coords[i + 5]])
                 
                 bezier_points = linearize_bezier(p0, p1, p2, p3, BEZIER_SAMPLES)
-                points.extend(bezier_points[1:])
+                current_segment.extend(bezier_points[1:])
                 current_pos = p3.copy()
                 
         elif cmd == 'L':
             # Line to (absolute)
             for i in range(0, len(coords) - 1, 2):
                 current_pos = np.array([coords[i], coords[i + 1]])
-                points.append(current_pos.copy())
+                current_segment.append(current_pos.copy())
                 
         elif cmd == 'l':
             # Line to (relative)
             for i in range(0, len(coords) - 1, 2):
                 current_pos = current_pos + np.array([coords[i], coords[i + 1]])
-                points.append(current_pos.copy())
+                current_segment.append(current_pos.copy())
                 
         elif cmd in ('Z', 'z'):
-            # Close path - connect back to start
-            if points:
-                points.append(points[0].copy())
+            # Close path - connect back to start of current segment
+            if current_segment:
+                current_segment.append(current_segment[0].copy())
     
-    return points
+    # Don't forget the last segment
+    if len(current_segment) >= 2:
+        segments.append(current_segment)
+    
+    return segments
 
 
 # ============================================================================
@@ -456,53 +474,51 @@ def create_sphere(resolution: int = SPHERE_RESOLUTION) -> pv.PolyData:
     return sphere
 
 
-def create_latitude_line(lat: float, num_points: int = 200) -> pv.PolyData:
+def create_latitude_line(lat: float, num_points: int = 200, 
+                         tube_radius: float = 0.004) -> pv.PolyData:
     """
-    Create a latitude (parallel) line on the sphere.
+    Create a latitude (parallel) line on the sphere as tube geometry.
     
     Args:
         lat: Latitude in degrees
         num_points: Number of points in the circle
+        tube_radius: Radius of the tube
         
     Returns:
-        PyVista line representing the parallel
+        PyVista tube representing the parallel
     """
     lat_rad = math.radians(lat)
     circle_radius = SPHERE_RADIUS * math.cos(lat_rad)
     z = SPHERE_RADIUS * math.sin(lat_rad)
     
-    angles = np.linspace(0, 2 * np.pi, num_points, endpoint=False)
+    # Create closed circle with extra point to close the loop
+    angles = np.linspace(0, 2 * np.pi, num_points + 1)
     
-    points = np.zeros((num_points, 3))
+    points = np.zeros((num_points + 1, 3))
     points[:, 0] = circle_radius * np.cos(angles)
     points[:, 1] = circle_radius * np.sin(angles)
     points[:, 2] = z
     
-    # Create closed polyline
-    lines = np.zeros(num_points + 2, dtype=np.int_)
-    lines[0] = num_points + 1
-    lines[1:num_points + 1] = np.arange(num_points)
-    lines[num_points + 1] = 0  # Close the loop
-    
-    # Add the first point again to close the loop
-    points = np.vstack([points, points[0:1]])
-    
+    # Create polyline
     line = pv.PolyData(points)
     line.lines = np.array([num_points + 1] + list(range(num_points + 1)))
     
-    return line
+    # Convert to tube to eliminate vertex nodes
+    return line.tube(radius=tube_radius, n_sides=8)
 
 
-def create_longitude_line(lon: float, num_points: int = 100) -> pv.PolyData:
+def create_longitude_line(lon: float, num_points: int = 100,
+                          tube_radius: float = 0.003) -> pv.PolyData:
     """
-    Create a longitude (meridian) line on the sphere.
+    Create a longitude (meridian) line on the sphere as tube geometry.
     
     Args:
         lon: Longitude in degrees
         num_points: Number of points in the arc
+        tube_radius: Radius of the tube
         
     Returns:
-        PyVista line representing the meridian
+        PyVista tube representing the meridian
     """
     lon_rad = math.radians(lon)
     
@@ -517,12 +533,13 @@ def create_longitude_line(lon: float, num_points: int = 100) -> pv.PolyData:
     line = pv.PolyData(points)
     line.lines = np.array([num_points] + list(range(num_points)))
     
-    return line
+    # Convert to tube to eliminate vertex nodes
+    return line.tube(radius=tube_radius, n_sides=8)
 
 
 def create_grid_lines() -> Tuple[List[pv.PolyData], List[pv.PolyData], pv.PolyData]:
     """
-    Create latitude and longitude grid lines.
+    Create latitude and longitude grid lines as tube geometry.
     
     Returns:
         Tuple of (parallels list, meridians list, equator)
@@ -532,30 +549,32 @@ def create_grid_lines() -> Tuple[List[pv.PolyData], List[pv.PolyData], pv.PolyDa
     
     # Latitude lines: -60° to +60° in 30° steps
     for lat in [-60, -30, 0, 30, 60]:
-        line = create_latitude_line(lat)
         if lat == 0:
-            equator = line
+            # Equator gets thicker tube
+            equator = create_latitude_line(lat, tube_radius=EQUATOR_TUBE_RADIUS)
         else:
-            parallels.append(line)
+            parallels.append(create_latitude_line(lat, tube_radius=GRID_TUBE_RADIUS))
     
     # Longitude lines: -180° to +150° in 30° steps (12 lines)
     meridians = []
     for lon in range(-180, 180, 30):
-        line = create_longitude_line(lon)
-        meridians.append(line)
+        meridians.append(create_longitude_line(lon, tube_radius=GRID_TUBE_RADIUS))
     
     return parallels, meridians, equator
 
 
-def points_to_polyline(points_3d: List[np.ndarray]) -> Optional[pv.PolyData]:
+def points_to_polyline(points_3d: List[np.ndarray], as_tube: bool = True, 
+                       tube_radius: float = 0.003) -> Optional[pv.PolyData]:
     """
-    Convert list of 3D points to a PyVista polyline.
+    Convert list of 3D points to a PyVista polyline or tube.
     
     Args:
         points_3d: List of 3D points
+        as_tube: If True, convert to tube geometry (eliminates vertex nodes)
+        tube_radius: Radius of tube if as_tube is True
         
     Returns:
-        PyVista polyline or None if insufficient points
+        PyVista polyline/tube or None if insufficient points
     """
     if len(points_3d) < 2:
         return None
@@ -568,6 +587,15 @@ def points_to_polyline(points_3d: List[np.ndarray]) -> Optional[pv.PolyData]:
     
     polyline = pv.PolyData(points_array)
     polyline.lines = lines
+    
+    # Convert to tube geometry to eliminate vertex nodes
+    if as_tube:
+        try:
+            tube = polyline.tube(radius=tube_radius, n_sides=8)
+            return tube
+        except Exception:
+            # Fall back to polyline if tube creation fails
+            return polyline
     
     return polyline
 
@@ -590,50 +618,58 @@ def apply_hemisphere_shift(points: List[np.ndarray], shift: float) -> List[np.nd
     return [np.array([p[0] + shift, p[1]]) for p in points]
 
 
-def process_svg_paths(svg_paths: List[str], hemisphere_shift: float = 0.0) -> List[pv.PolyData]:
+def process_svg_paths(svg_paths: List[str], hemisphere_shift: float = 0.0,
+                      tube_radius: float = 0.001) -> List[pv.PolyData]:
     """
     Process SVG paths and convert to 3D polylines with hemisphere alignment.
+    Properly handles disconnected segments (islands) within the same path.
     
     Args:
         svg_paths: List of SVG path 'd' attribute strings
         hemisphere_shift: X-coordinate shift for hemisphere alignment
                          (INNER_SHIFT for InnerWorld, OUTER_SHIFT for OuterWorld)
+        tube_radius: Radius for tube geometry
         
     Returns:
-        List of PyVista polylines
+        List of PyVista tube meshes (one per disconnected segment)
     """
     polylines = []
     total_points_before = 0
     total_points_after = 0
+    total_segments = 0
     
     for i, path_data in enumerate(svg_paths):
-        # Convert path to 2D points (local coordinates)
-        points_2d = path_to_points(path_data)
+        # Convert path to list of 2D point segments
+        # Each segment is a disconnected part (separated by M commands)
+        segments = path_to_points(path_data)
         
-        if len(points_2d) < 2:
-            continue
-        
-        # CRITICAL: Apply hemisphere shift BEFORE any other processing
-        points_2d = apply_hemisphere_shift(points_2d, hemisphere_shift)
-        
-        total_points_before += len(points_2d)
-        
-        # Optional simplification (after hemisphere alignment)
-        if SIMPLIFY_ENABLED and len(points_2d) > SIMPLIFY_THRESHOLD:
-            points_2d = simplify_path(points_2d)
-        
-        total_points_after += len(points_2d)
-        
-        # Convert to 3D (now using unified coordinates)
-        points_3d = [svg_point_to_3d(p) for p in points_2d]
-        
-        # Create polyline
-        polyline = points_to_polyline(points_3d)
-        if polyline is not None:
-            polylines.append(polyline)
+        for segment in segments:
+            if len(segment) < 2:
+                continue
+            
+            # CRITICAL: Apply hemisphere shift BEFORE any other processing
+            segment = apply_hemisphere_shift(segment, hemisphere_shift)
+            
+            total_points_before += len(segment)
+            
+            # Optional simplification (after hemisphere alignment)
+            if SIMPLIFY_ENABLED and len(segment) > SIMPLIFY_THRESHOLD:
+                segment = simplify_path(segment)
+            
+            total_points_after += len(segment)
+            
+            # Convert to 3D (now using unified coordinates)
+            points_3d = [svg_point_to_3d(p) for p in segment]
+            
+            # Create tube (one per disconnected segment - no false connections)
+            tube = points_to_polyline(points_3d, as_tube=True, tube_radius=tube_radius)
+            if tube is not None:
+                polylines.append(tube)
+                total_segments += 1
     
     shift_label = f"shift={hemisphere_shift:+.1f}"
-    print(f"  [{shift_label}] Points: {total_points_before:,} -> {total_points_after:,} "
+    print(f"  [{shift_label}] Segments: {total_segments}, "
+          f"Points: {total_points_before:,} -> {total_points_after:,} "
           f"({100 * total_points_after / max(1, total_points_before):.1f}%)")
     
     return polylines
@@ -687,16 +723,18 @@ def main():
     # Process InnerWorld (Eastern hemisphere) with left shift
     if inner_paths:
         print(f"  Processing InnerWorld ({len(inner_paths)} paths)...")
-        inner_polylines = process_svg_paths(inner_paths, hemisphere_shift=INNER_SHIFT)
+        inner_polylines = process_svg_paths(inner_paths, hemisphere_shift=INNER_SHIFT,
+                                            tube_radius=MAP_TUBE_RADIUS)
         map_polylines.extend(inner_polylines)
-        print(f"    Created {len(inner_polylines)} polylines from InnerWorld")
+        print(f"    Created {len(inner_polylines)} tube segments from InnerWorld")
     
     # Process OuterWorld (Western hemisphere) with right shift
     if outer_paths:
         print(f"  Processing OuterWorld ({len(outer_paths)} paths)...")
-        outer_polylines = process_svg_paths(outer_paths, hemisphere_shift=OUTER_SHIFT)
+        outer_polylines = process_svg_paths(outer_paths, hemisphere_shift=OUTER_SHIFT,
+                                            tube_radius=MAP_TUBE_RADIUS)
         map_polylines.extend(outer_polylines)
-        print(f"    Created {len(outer_polylines)} polylines from OuterWorld")
+        print(f"    Created {len(outer_polylines)} tube segments from OuterWorld")
     
     print(f"Total polylines: {len(map_polylines)}")
     
@@ -704,7 +742,7 @@ def main():
     print("\nGenerating sphere geometry...")
     sphere = create_sphere()
     
-    # Create grid
+    # Create grid (now returns tube geometry)
     print("Generating lat/lon grid...")
     parallels, meridians, equator = create_grid_lines()
     
@@ -721,28 +759,24 @@ def main():
         name='sphere'
     )
     
-    # Add map polylines (render as tubes without vertex emphasis)
+    # Add map polylines (now tube geometry - no vertex nodes)
     for i, polyline in enumerate(map_polylines):
         plotter.add_mesh(
             polyline,
             color=MAP_COLOR,
-            line_width=LINE_WIDTH,
             opacity=LINE_OPACITY,
-            render_lines_as_tubes=True,
-            style='wireframe',  # Ensures clean line rendering
+            smooth_shading=True,
             name=f'map_{i}'
         )
     
-    # Add grid lines (also as clean tubes without vertices)
+    # Add grid lines (tube geometry)
     # Equator (red)
     if equator is not None:
         plotter.add_mesh(
             equator,
             color='red',
-            line_width=3,
             opacity=0.7,
-            render_lines_as_tubes=True,
-            style='wireframe',
+            smooth_shading=True,
             name='equator'
         )
     
@@ -751,10 +785,8 @@ def main():
         plotter.add_mesh(
             parallel,
             color='yellow',
-            line_width=2,
             opacity=0.7,
-            render_lines_as_tubes=True,
-            style='wireframe',
+            smooth_shading=True,
             name=f'parallel_{i}'
         )
     
@@ -763,18 +795,24 @@ def main():
         plotter.add_mesh(
             meridian,
             color='gray',
-            line_width=2,
             opacity=0.7,
-            render_lines_as_tubes=True,
-            style='wireframe',
+            smooth_shading=True,
             name=f'meridian_{i}'
         )
     
-    # Configure camera for terrain-style viewing (stable horizon)
-    plotter.camera_position = 'xy'
-    plotter.camera.zoom(0.8)
+    # Configure camera for proper globe viewing
+    # Camera looks at sphere from positive X direction (viewing prime meridian)
+    # Z-axis is up (north pole at top)
+    # This gives natural globe orientation for terrain-style rotation
+    camera_distance = 3.0
+    plotter.camera_position = [
+        (camera_distance, 0, 0),  # Camera location (looking from +X)
+        (0, 0, 0),                # Focal point (sphere center)
+        (0, 0, 1)                 # View up vector (Z is up = north)
+    ]
     
-    # Enable terrain-style camera controls (natural globe rotation)
+    # Enable terrain-style camera controls
+    # This keeps the "up" direction stable while rotating
     plotter.enable_terrain_style(mouse_wheel_zooms=True)
     
     # Show instructions
@@ -785,6 +823,10 @@ def main():
     print("  Scroll:     Zoom in/out")
     print("  Q or ESC:   Close window")
     print("=" * 60)
+    print("\nCamera setup:")
+    print("  - Viewing prime meridian (lon=0°)")
+    print("  - North pole at top (Z-up)")
+    print("  - Terrain-style rotation maintains horizon")
     
     # Show the visualization
     print("\nOpening visualization window...")
